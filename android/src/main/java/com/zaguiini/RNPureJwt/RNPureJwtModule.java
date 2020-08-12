@@ -29,12 +29,21 @@ import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.SignatureException;
 import io.jsonwebtoken.impl.DefaultClaims;
 
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.KeyFactory;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
+import android.util.Log;
+
 public class RNPureJwtModule extends ReactContextBaseJavaModule {
 
     public RNPureJwtModule(ReactApplicationContext reactContext) {
         super(reactContext);
     }
-
     @Override
     public String getName() {
     return "RNPureJwt";
@@ -94,9 +103,56 @@ public class RNPureJwtModule extends ReactContextBaseJavaModule {
         callback.resolve(response);
     }
 
+    private PrivateKey toPrivateKey(String strPrivateKey) {
+        PrivateKey privateKey = null;
+        try {
+            byte [] decoded = Base64.decode(strPrivateKey, Base64.DEFAULT);
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(decoded);
+            KeyFactory kf = KeyFactory.getInstance("RSA");
+            privateKey = kf.generatePrivate(keySpec);
+        } catch (Exception ex) {
+            Log.d("RNPureJwtModule - toPrivateKey", ex.getMessage());
+        }
+        return privateKey;
+    }
+
+    private PublicKey toPublicKey(String strPublicKey) {
+        PublicKey publicKey = null;
+        try {
+            byte [] decoded = Base64.decode(strPublicKey, Base64.DEFAULT);
+            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(decoded);
+            KeyFactory kf = KeyFactory.getInstance("RSA");
+            publicKey = kf.generatePublic(keySpec);
+        } catch (Exception ex) {
+            Log.d("RNPureJwtModule - toPublicKey", ex.getMessage());
+        }
+        return publicKey;
+    }
+
+    @ReactMethod
+    public void generateRSAKeys(int keySize, Promise promise){
+        try {
+            KeyPairGenerator keyGenerator = KeyPairGenerator.getInstance("RSA");
+            keyGenerator.initialize(keySize);
+            KeyPair kp = keyGenerator.genKeyPair();
+            PublicKey publicKey = (PublicKey) kp.getPublic();
+            PrivateKey privateKey = (PrivateKey) kp.getPrivate();
+            String encodedPublicKey = Base64.encodeToString(publicKey.getEncoded(), Base64.DEFAULT);
+            String encodedPrivateKey = Base64.encodeToString(privateKey.getEncoded(), Base64.DEFAULT);
+            WritableMap map = Arguments.createMap();
+            map.putString("publicKey", encodedPublicKey);
+            map.putString("privateKey", encodedPrivateKey);
+            promise.resolve(map);
+        } catch (Exception ex) {
+            promise.reject("0", ex.getMessage());
+        }
+    }
+
     @ReactMethod
     public void decode(String token, String secret, ReadableMap options, Promise callback) {
-        JwtParser parser = Jwts.parser().setSigningKey(this.toBase64(secret));
+        String algorithm = options.hasKey("alg") ? options.getString("alg") : "HS256";
+        boolean isRSA = algorithm.contains("RS");
+        JwtParser parser = isRSA ? Jwts.parser().setSigningKey(this.toPublicKey(secret)) : Jwts.parser().setSigningKey(this.toBase64(secret));
 
         Boolean skipValidation = false;
 
@@ -118,7 +174,7 @@ public class RNPureJwtModule extends ReactContextBaseJavaModule {
         Jwt parsed;
 
         try {
-            parsed = parser.parse(token);
+            parsed = isRSA ? parser.parseClaimsJws(token) : parser.parse(token);
         } catch(MalformedJwtException e) {
             if(skipValidation) {
                 this.getResponse(token, callback);
@@ -157,11 +213,12 @@ public class RNPureJwtModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void sign(ReadableMap claims, String secret, ReadableMap options, Promise callback) {
         String algorithm = options.hasKey("alg") ? options.getString("alg") : "HS256";
-        JwtBuilder constructedToken = Jwts.builder()
-                .signWith(SignatureAlgorithm.forName(algorithm), this.toBase64(secret))
-                .setHeaderParam("alg", algorithm)
-                .setHeaderParam("typ", "JWT");
-
+        boolean isRSA = algorithm.contains("RS");
+        JwtBuilder constructedToken = isRSA ?
+                Jwts.builder().signWith(SignatureAlgorithm.forName(algorithm), this.toPrivateKey(secret)) :
+                Jwts.builder().signWith(SignatureAlgorithm.forName(algorithm), this.toBase64(secret));
+        constructedToken.setHeaderParam("alg", algorithm);
+        constructedToken.setHeaderParam("typ", "JWT");
         Set<Map.Entry<String, Object>> entries = claims.toHashMap().entrySet();
 
         for (Object entry: entries) {
